@@ -29,7 +29,7 @@ int main(int argc, char **argv) {
     if (strcmp(cmd, "scan") == 0) {
         char addresses[32][LV_ADDRESS_MAX];
         char names[32][LV_ADDRESS_MAX];
-        int n = lv_scan(LV_SERVICE_UUID, 10000, addresses, names, 32);
+        int n = lv_scan_dat(10000, addresses, names, 32);
         if (n == 0) {
             fprintf(stderr, "No devices found\n");
             return 1;

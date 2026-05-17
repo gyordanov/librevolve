@@ -17,6 +17,9 @@ struct lv_client {
 /* Scan timeout in milliseconds; writes up to max_devices (address, name) pairs. Returns count. */
 int lv_scan(const char *service_uuid, int timeout_ms, char addresses[][LV_ADDRESS_MAX], char names[][LV_ADDRESS_MAX], int max_devices);
 
+/* Scan and return only devices with DAT-like advertised names. */
+int lv_scan_dat(int timeout_ms, char addresses[][LV_ADDRESS_MAX], char names[][LV_ADDRESS_MAX], int max_devices);
+
 int lv_connect(lv_client_t *client, const char *address, int timeout_ms);
 int lv_disconnect(lv_client_t *client);
 

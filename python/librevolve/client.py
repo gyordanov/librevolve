@@ -7,13 +7,12 @@ import logging
 import os
 from typing import List, Optional, Tuple
 
-from bleak import BleakClient, BleakScanner
+from bleak import BleakClient
 
 from librevolve import protocol as proto
+from librevolve.discovery import TurntableDevice, discover_turntables, find_first_turntable
 
 logger = logging.getLogger(__name__)
-
-NAME_HINTS = ('REVOPOINT', 'DAT', 'DUAL', 'TURNTABLE')
 
 
 class TurntableNotFoundError(Exception):
@@ -49,26 +48,13 @@ class DialAxisTurntable:
     def device_address(self) -> Optional[str]:
         return self._device_address
 
-    async def scan(self, timeout: float = 10.0) -> List[Tuple[str, str]]:
-        """Return ``(address, name)`` pairs advertising the DAT service."""
-        scanner = BleakScanner(service_uuids=[proto.SERVICE_UUID])
-        devices = await scanner.discover(timeout=timeout)
-        results: List[Tuple[str, str]] = []
-        seen = set()
-        for dev in devices:
-            if dev.address in seen:
-                continue
-            seen.add(dev.address)
-            name = dev.name or '(unknown)'
-            results.append((dev.address, name))
-        if not results:
-            for dev in await BleakScanner.discover(timeout=timeout):
-                name = (dev.name or '').upper()
-                if any(hint in name for hint in NAME_HINTS):
-                    if dev.address not in seen:
-                        seen.add(dev.address)
-                        results.append((dev.address, dev.name or '(unknown)'))
-        return results
+    async def scan(self, timeout: float = 10.0, *, dat_only: bool = True) -> List[TurntableDevice]:
+        """Discover nearby turntables. Prefer :func:`librevolve.discover_turntables`."""
+        return await discover_turntables(timeout=timeout, dat_only=dat_only)
+
+    async def scan_pairs(self, timeout: float = 10.0, *, dat_only: bool = True) -> List[Tuple[str, str]]:
+        """Return ``(address, name)`` pairs (legacy helper)."""
+        return [(d.address, d.name) for d in await self.scan(timeout=timeout, dat_only=dat_only)]
 
     async def connect(
         self,
@@ -81,14 +67,14 @@ class DialAxisTurntable:
 
         addr = address or os.environ.get('LIBREVOLVE_DEVICE')
         if not addr:
-            found = await self.scan(timeout=min(timeout, 15.0))
-            if not found:
+            device = await find_first_turntable(timeout=min(timeout, 15.0))
+            if device is None:
                 raise TurntableNotFoundError(
                     'No Revopoint DAT found. Power on the turntable, disconnect other BLE clients, '
                     'or set LIBREVOLVE_DEVICE.'
                 )
-            addr = found[0][0]
-            logger.info('Auto-selected device %s (%s)', found[0][0], found[0][1])
+            addr = device.address
+            logger.info('Auto-selected device %s (%s)', device.address, device.name)
 
         self._client = BleakClient(addr, timeout=timeout)
         await self._client.connect()
@@ -118,7 +104,8 @@ class DialAxisTurntable:
 
         async with self._lock:
             logger.debug('TX %s', cmd)
-            await self._client.write_gatt_char(self._char_uuid, cmd.encode('utf-8'), response=True)
+            # DAT GATT char supports write-without-response only (not write-with-response).
+            await self._client.write_gatt_char(self._char_uuid, cmd.encode('utf-8'), response=False)
             await asyncio.sleep(self.read_delay_s)
             data = await self._client.read_gatt_char(self._char_uuid)
             response = data.decode('utf-8', errors='replace').strip()

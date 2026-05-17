@@ -8,19 +8,20 @@ import os
 import sys
 
 from librevolve.client import DialAxisTurntable, TurntableNotFoundError
+from librevolve.discovery import discover_turntables
 
 
 def _device_address():
     return os.environ.get('LIBREVOLVE_DEVICE')
 
 
-async def _cmd_scan(tt: DialAxisTurntable, _args: argparse.Namespace) -> int:
-    devices = await tt.scan()
+async def _cmd_scan(_tt: DialAxisTurntable, args: argparse.Namespace) -> int:
+    devices = await discover_turntables(timeout=args.timeout, dat_only=not args.all)
     if not devices:
-        print('No devices found.', file=sys.stderr)
+        print('No turntables found.', file=sys.stderr)
         return 1
-    for addr, name in devices:
-        print(f'{addr}\t{name}')
+    for dev in devices:
+        print(dev)
     return 0
 
 
@@ -92,7 +93,10 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument('--address', '-a', help='BLE address (or LIBREVOLVE_DEVICE)')
     sub = parser.add_subparsers(dest='command', required=True)
 
-    sub.add_parser('scan', help='Scan for turntables').set_defaults(func=_cmd_scan)
+    p = sub.add_parser('scan', help='Discover nearby Revopoint DAT devices')
+    p.add_argument('--timeout', type=float, default=10.0, help='Scan duration in seconds')
+    p.add_argument('--all', action='store_true', help='Show all BLE devices, not only likely DAT')
+    p.set_defaults(func=_cmd_scan)
 
     p = sub.add_parser('connect', help='Connect to turntable')
     p.set_defaults(func=_cmd_connect)

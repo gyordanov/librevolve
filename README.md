@@ -19,11 +19,37 @@ Only one client should connect at a time (disconnect the Revopoint phone app or 
 pip install -e ".[dev]"
 ```
 
+## Discovery
+
+Find turntables without connecting:
+
+```python
+from librevolve import discover_turntables, discover_turntables_sync
+
+# Async
+devices = await discover_turntables(timeout=10.0)
+for dev in devices:
+    print(dev.address, dev.name, dev.rssi, dev.likely_dat)
+
+# Sync
+devices = discover_turntables_sync()
+```
+
+CLI:
+
+```bash
+revolve scan              # likely DAT devices only
+revolve scan --all        # every advertiser (with likely_dat flags)
+revolve scan --timeout 15
+```
+
+Each result is a `TurntableDevice` with `address`, `name`, optional `rssi`, and flags `has_dat_service` / `name_match`. Use `likely_dat` to filter programmatically.
+
 ## Quick start
 
 ```python
 import asyncio
-from librevolve import DialAxisTurntable
+from librevolve import DialAxisTurntable, discover_turntables
 
 async def main():
     tt = DialAxisTurntable()

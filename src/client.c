@@ -35,6 +35,29 @@ static simpleble_adapter_t get_default_adapter(void) {
     return simpleble_adapter_get_handle(0);
 }
 
+static void copy_upper(char *dest, size_t n, const char *src) {
+    size_t i = 0;
+    for (; src[i] && i + 1 < n; ++i) {
+        dest[i] = (char)toupper((unsigned char)src[i]);
+    }
+    dest[i] = '\0';
+}
+
+static int name_matches_hints(const char *name) {
+    if (!name) {
+        return 0;
+    }
+    char upper[128];
+    copy_upper(upper, sizeof(upper), name);
+    static const char *hints[] = {"REVO_DUAL", "REVOPOINT", "DUAL_AXIS", "DUAL-AXIS", "DAT", "TURNTABLE", NULL};
+    for (int i = 0; hints[i]; ++i) {
+        if (strstr(upper, hints[i]) != NULL) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
 static simpleble_peripheral_t find_peripheral_by_address(simpleble_adapter_t adapter, const char *address) {
     size_t count = simpleble_adapter_scan_get_results_count(adapter);
     for (size_t i = 0; i < count; ++i) {
@@ -53,7 +76,7 @@ static simpleble_peripheral_t find_peripheral_by_address(simpleble_adapter_t ada
 
 int lv_scan(const char *service_uuid, int timeout_ms, char addresses[][LV_ADDRESS_MAX],
             char names[][LV_ADDRESS_MAX], int max_devices) {
-    (void)service_uuid;
+    int dat_names_only = (service_uuid != NULL && service_uuid[0] != '\0');
     simpleble_adapter_t adapter = get_default_adapter();
     if (!adapter) {
         return 0;
@@ -70,6 +93,13 @@ int lv_scan(const char *service_uuid, int timeout_ms, char addresses[][LV_ADDRES
         char *addr = simpleble_peripheral_address(peripheral);
         char *name = simpleble_peripheral_identifier(peripheral);
         if (!addr) {
+            if (name) {
+                simpleble_free(name);
+            }
+            continue;
+        }
+        if (dat_names_only && !name_matches_hints(name)) {
+            simpleble_free(addr);
             if (name) {
                 simpleble_free(name);
             }
@@ -154,7 +184,8 @@ int lv_send(lv_client_t *client, const char *cmd, char *resp, size_t resp_size, 
 
     pthread_mutex_lock(&g_send_lock);
 
-    simpleble_err_t err = simpleble_peripheral_write_request(
+    /* DAT ffe1 supports write-without-response only. */
+    simpleble_err_t err = simpleble_peripheral_write_command(
         (simpleble_peripheral_t)client->peripheral, service, characteristic, (const uint8_t *)cmd, strlen(cmd));
 
     if (err != SIMPLEBLE_SUCCESS) {
@@ -221,4 +252,8 @@ int lv_get_rotation_angle(lv_client_t *client, int *angle) {
         return -1;
     }
     return lv_parse_data_int(resp, angle);
+}
+
+int lv_scan_dat(int timeout_ms, char addresses[][LV_ADDRESS_MAX], char names[][LV_ADDRESS_MAX], int max_devices) {
+    return lv_scan(LV_SERVICE_UUID, timeout_ms, addresses, names, max_devices);
 }
