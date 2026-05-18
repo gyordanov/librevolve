@@ -19,6 +19,15 @@ Only one client should connect at a time (disconnect the Revopoint phone app or 
 pip install -e ".[dev]"
 ```
 
+## Use with ferret-scan
+
+[ferret-scan](https://github.com/benklop/ferret-scan) vendors this repo as a git submodule and exposes it as the optional `revolve` extra:
+
+```bash
+git submodule update --init packages/librevolve
+uv sync --extra revolve
+```
+
 ## Discovery
 
 Find turntables without connecting:
