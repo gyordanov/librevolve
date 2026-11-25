@@ -175,3 +175,35 @@ def test_cli_disconnect_skips_stop_only_for_fire_and_return(argv, keeps_moving):
     from librevolve import cli
 
     assert cli._leaves_motion_running(cli._build_parser().parse_args(argv)) is keeps_moving
+
+
+async def test_run_sequence_reports_in_step_progress():
+    device = SimulatedTable(step=10.0)
+    polls = []
+    await _turntable(device).run_sequence(
+        [('rotate', -40), ('tilt', 5)],
+        poll_interval=0.001,
+        on_poll=lambda index, state, progress: polls.append((index, progress)),
+    )
+    rotate = [p for i, p in polls if i == 0]
+    assert [p.done for p in rotate[:3]] == [10.0, 20.0, 30.0]
+    assert rotate[-1] == (40.0, 40.0)
+    assert [p for i, p in polls if i == 1][-1] == (5.0, 5.0)
+
+
+async def test_run_sequence_timeout_follows_configured_speed(monkeypatch):
+    device = SimulatedTable(step=10.0)
+    tt = _turntable(device)
+    tt.rotation_speed = proto.ROTATION_SPEED_MAX
+    timeouts = []
+    real_wait = tt.wait_until_idle
+
+    async def spy(**kwargs):
+        timeouts.append(kwargs['timeout'])
+        return await real_wait(**kwargs)
+
+    monkeypatch.setattr(tt, 'wait_until_idle', spy)
+    await tt.run_sequence([('rotate', 380)], poll_interval=0.001)
+    assert timeouts[0] >= 2 * 380 / proto.degrees_per_second(proto.ROTATION_SPEED_MAX)
+    await tt.run_sequence([('rotate', 10)], poll_interval=0.001, base_timeout=None)
+    assert timeouts[1] is None

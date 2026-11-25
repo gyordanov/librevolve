@@ -13,8 +13,9 @@ from librevolve.client import (
     MotionTimeoutError,
     TurntableNotFoundError,
 )
+from librevolve import protocol as proto
 from librevolve.discovery import discover_turntables
-from librevolve.sequence import SequenceError, parse_sequence
+from librevolve.sequence import SequenceError, SequenceStep, parse_sequence
 
 
 def _device_address():
@@ -43,11 +44,11 @@ async def _cmd_disconnect(tt: DialAxisTurntable, _args: argparse.Namespace) -> i
     return 0
 
 
-async def _wait_for_motion(tt: DialAxisTurntable, args: argparse.Namespace) -> int:
+async def _wait_for_motion(tt: DialAxisTurntable, args: argparse.Namespace, step: SequenceStep) -> int:
     if args.no_wait:
         return 0
     try:
-        state = await tt.wait_until_idle(timeout=args.wait_timeout)
+        state = await tt.wait_until_idle(timeout=tt.motion_timeout(step, base_timeout=args.wait_timeout))
     except MotionTimeoutError as exc:
         print(exc, file=sys.stderr)
         return 1
@@ -60,7 +61,7 @@ async def _cmd_rotate(tt: DialAxisTurntable, args: argparse.Namespace) -> int:
     resp = await tt.rotate(args.degrees)
     if resp:
         print(resp)
-    return await _wait_for_motion(tt, args)
+    return await _wait_for_motion(tt, args, SequenceStep('rotate', args.degrees))
 
 
 async def _cmd_tilt(tt: DialAxisTurntable, args: argparse.Namespace) -> int:
@@ -68,7 +69,7 @@ async def _cmd_tilt(tt: DialAxisTurntable, args: argparse.Namespace) -> int:
     resp = await tt.tilt(args.degrees)
     if resp:
         print(resp)
-    return await _wait_for_motion(tt, args)
+    return await _wait_for_motion(tt, args, SequenceStep('tilt', args.degrees))
 
 
 async def _cmd_angle(tt: DialAxisTurntable, args: argparse.Namespace) -> int:
@@ -90,7 +91,7 @@ async def _cmd_stop(tt: DialAxisTurntable, args: argparse.Namespace) -> int:
 async def _cmd_zero(tt: DialAxisTurntable, args: argparse.Namespace) -> int:
     await _ensure_connected(tt, args)
     await tt.zero()
-    return await _wait_for_motion(tt, args)
+    return await _wait_for_motion(tt, args, SequenceStep('zero'))
 
 
 async def _cmd_spin(tt: DialAxisTurntable, args: argparse.Namespace) -> int:
@@ -151,13 +152,27 @@ def _add_wait_args(p: argparse.ArgumentParser) -> None:
         '--wait-timeout',
         type=float,
         default=DEFAULT_WAIT_TIMEOUT_S,
-        help='Seconds to wait for motion to settle (default: %(default)s)',
+        help='Minimum seconds to wait for motion to settle; slow speeds get more (default: %(default)s)',
     )
 
 
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog='revolve', description='Revopoint DAT Bluetooth control')
     parser.add_argument('--address', '-a', help='BLE address (or LIBREVOLVE_DEVICE)')
+    parser.add_argument(
+        '--speed',
+        type=float,
+        default=proto.DEFAULT_ROTATION_SPEED,
+        help=f'Rotation speed set at connect, seconds per turn, larger is slower '
+        f'({proto.ROTATION_SPEED_MIN:g}..{proto.ROTATION_SPEED_MAX:g}, default: %(default)s)',
+    )
+    parser.add_argument(
+        '--tilt-speed',
+        type=float,
+        default=proto.DEFAULT_TILT_SPEED,
+        help=f'Tilt speed set at connect, seconds per 360 degrees '
+        f'({proto.TILT_SPEED_MIN:g}..{proto.TILT_SPEED_MAX:g}, default: %(default)s)',
+    )
     sub = parser.add_subparsers(dest='command', required=True)
 
     p = sub.add_parser('scan', help='Discover nearby Revopoint DAT devices')
@@ -218,7 +233,10 @@ def _build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     parser = _build_parser()
     args = parser.parse_args(argv)
-    tt = DialAxisTurntable()
+    try:
+        tt = DialAxisTurntable(rotation_speed=args.speed, tilt_speed=args.tilt_speed)
+    except ValueError as exc:
+        parser.error(str(exc))
 
     async def run() -> int:
         try:

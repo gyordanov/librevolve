@@ -98,29 +98,77 @@ def parse_sequence(text: str) -> List[SequenceStep]:
 def step_timeout(
     step: SequenceStep,
     *,
-    base_timeout: float,
+    base_timeout: Optional[float],
     current_tilt: Optional[float] = None,
     current_rotation: Optional[float] = None,
     min_speed_deg_s: float = SEQUENCE_MIN_SPEED_DEG_S,
+    tilt_min_speed_deg_s: Optional[float] = None,
     margin_s: float = SEQUENCE_TIMEOUT_MARGIN_S,
-) -> float:
+) -> Optional[float]:
     """Seconds to wait for *step* to settle: ``max(base, travel / min_speed + margin)``.
 
-    Travel is unknown for an unread axis, so tilt then assumes the full range.
+    *base_timeout* None means no limit. Travel is unknown for an unread axis, so
+    tilt then assumes the full range; tilt uses *tilt_min_speed_deg_s* when given.
     """
-    if step.action == 'rotate':
-        travel = abs(step.value)
-    elif step.action == 'tilt':
-        travel = (
-            abs(step.value - current_tilt)
-            if current_tilt is not None
-            else proto.TILT_MAX - proto.TILT_MIN
-        )
-    elif step.action == 'zero':
-        travel = max(
-            abs(current_rotation) if current_rotation is not None else 0.0,
-            abs(current_tilt) if current_tilt is not None else proto.TILT_MAX - proto.TILT_MIN,
-        )
-    else:
+    if step.action == 'wait':
         return step.value
-    return max(base_timeout, travel / min_speed_deg_s + margin_s)
+    if base_timeout is None:
+        return None
+    full_tilt = proto.TILT_MAX - proto.TILT_MIN
+    tilt_speed = tilt_min_speed_deg_s or min_speed_deg_s
+    if step.action == 'rotate':
+        seconds = abs(step.value) / min_speed_deg_s
+    elif step.action == 'tilt':
+        travel = abs(step.value - current_tilt) if current_tilt is not None else full_tilt
+        seconds = travel / tilt_speed
+    else:
+        rotation = abs(current_rotation) if current_rotation is not None else 0.0
+        tilt = abs(current_tilt) if current_tilt is not None else full_tilt
+        seconds = max(rotation / min_speed_deg_s, tilt / tilt_speed)
+    return max(base_timeout, seconds + margin_s)
+
+
+def angle_delta(old: float, new: float) -> float:
+    """Signed shortest move from *old* to *new*, so a reading that wraps at ±360 still counts."""
+    return (new - old + 180.0) % 360.0 - 180.0
+
+
+class StepProgress(NamedTuple):
+    """Degrees moved so far and degrees the step travels; *total* None when unknown."""
+
+    done: float
+    total: Optional[float]
+
+
+class StepTracker:
+    """Turns successive readings during one step into :class:`StepProgress`.
+
+    Rotation accumulates per-poll deltas, so it needs polls closer than 180 degrees apart.
+    """
+
+    def __init__(self, step: SequenceStep, start_rotation: Optional[float], start_tilt: Optional[float]):
+        self.step = step
+        self._start_tilt = start_tilt
+        self._last_rotation = start_rotation
+        self._turned = 0.0
+        self._zero_total = None
+        if step.action == 'zero':
+            self._zero_total = abs(start_rotation or 0.0) + abs(start_tilt or 0.0)
+
+    def update(self, rotation: Optional[float], tilt: Optional[float]) -> StepProgress:
+        step = self.step
+        if rotation is not None:
+            if self._last_rotation is not None:
+                self._turned += angle_delta(self._last_rotation, rotation)
+            self._last_rotation = rotation
+        if step.action == 'rotate':
+            done = self._turned if step.value >= 0 else -self._turned
+            return StepProgress(max(0.0, done), abs(step.value))
+        if step.action == 'tilt':
+            if self._start_tilt is None or tilt is None:
+                return StepProgress(0.0, None)
+            return StepProgress(abs(tilt - self._start_tilt), abs(step.value - self._start_tilt))
+        if step.action == 'zero':
+            remaining = abs(rotation or 0.0) + abs(tilt or 0.0)
+            return StepProgress(max(0.0, self._zero_total - remaining), self._zero_total)
+        return StepProgress(0.0, None)

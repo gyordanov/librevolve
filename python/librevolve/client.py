@@ -12,7 +12,14 @@ from bleak import BleakClient
 
 from librevolve import protocol as proto
 from librevolve.discovery import TurntableDevice, discover_turntables, find_first_turntable
-from librevolve.sequence import SequenceStep, StepLike, make_steps, step_timeout
+from librevolve.sequence import (
+    SequenceStep,
+    StepLike,
+    StepProgress,
+    StepTracker,
+    make_steps,
+    step_timeout,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -46,6 +53,19 @@ DEFAULT_POLL_INTERVAL_S = 0.25
 DEFAULT_SETTLE_POLLS = 4
 DEFAULT_START_GRACE_S = 1.5
 DEFAULT_EPSILON_DEG = 0.05
+# A step's timeout assumes the axis moves at this fraction of its configured rate.
+TIMEOUT_SPEED_FRACTION = 0.5
+
+
+def _checked_speed(name: str, speed: float, low: float, high: float) -> float:
+    if isinstance(speed, bool) or not isinstance(speed, (int, float)) or not low <= speed <= high:
+        raise ValueError(f'{name} must be {low:g}..{high:g} seconds per turn, got {speed!r}')
+    return float(speed)
+
+
+def _raise_if_rejected(resp: Optional[str], name: str, speed: float) -> None:
+    if resp and resp.upper().startswith('+FAIL'):
+        raise ValueError(f'device rejected {name}={speed:g}: {resp}')
 
 
 def _axis_changed(old: Optional[float], new: Optional[float], epsilon: float) -> bool:
@@ -64,8 +84,10 @@ class DialAxisTurntable:
         tilt_speed: float = proto.DEFAULT_TILT_SPEED,
     ) -> None:
         self.read_delay_s = read_delay_s
-        self.rotation_speed = rotation_speed
-        self.tilt_speed = tilt_speed
+        self.rotation_speed = _checked_speed(
+            'rotation_speed', rotation_speed, proto.ROTATION_SPEED_MIN, proto.ROTATION_SPEED_MAX
+        )
+        self.tilt_speed = _checked_speed('tilt_speed', tilt_speed, proto.TILT_SPEED_MIN, proto.TILT_SPEED_MAX)
         self._client: Optional[BleakClient] = None
         self._char_uuid = proto.CHARACTERISTIC_UUID
         self._lock = asyncio.Lock()
@@ -151,7 +173,7 @@ class DialAxisTurntable:
         """Rotate by *degrees*; with *wait*, block until :meth:`wait_until_idle`."""
         resp = await self.send(proto.cmd_turn_angle(degrees))
         if wait:
-            await self.wait_until_idle()
+            await self.wait_until_idle(timeout=self.motion_timeout(SequenceStep('rotate', float(degrees))))
         return resp
 
     async def spin(self, direction: int = 1) -> Optional[str]:
@@ -161,8 +183,15 @@ class DialAxisTurntable:
         return await self.send(proto.cmd_turn_continue(direction))
 
     async def set_rotation_speed(self, speed: float) -> Optional[str]:
+        """Set seconds per turn (larger is slower); applies at once, even mid-move.
+
+        Raises ValueError outside the device range or when the device answers +FAIL.
+        """
+        speed = _checked_speed('rotation speed', speed, proto.ROTATION_SPEED_MIN, proto.ROTATION_SPEED_MAX)
+        resp = await self.send(proto.cmd_turn_speed(speed))
+        _raise_if_rejected(resp, 'TURNSPEED', speed)
         self.rotation_speed = speed
-        return await self.send(proto.cmd_turn_speed(speed))
+        return resp
 
     async def rotation_stop(self) -> Optional[str]:
         return await self.send(proto.cmd_rotation_stop())
@@ -174,12 +203,16 @@ class DialAxisTurntable:
         """Tilt to absolute *degrees*; with *wait*, block until :meth:`wait_until_idle`."""
         resp = await self.send(proto.cmd_tilt_value(degrees))
         if wait:
-            await self.wait_until_idle()
+            await self.wait_until_idle(timeout=self.motion_timeout(SequenceStep('tilt', float(degrees))))
         return resp
 
     async def set_tilt_speed(self, speed: float) -> Optional[str]:
+        """Like :meth:`set_rotation_speed` for the tilt axis."""
+        speed = _checked_speed('tilt speed', speed, proto.TILT_SPEED_MIN, proto.TILT_SPEED_MAX)
+        resp = await self.send(proto.cmd_tilt_speed(speed))
+        _raise_if_rejected(resp, 'TILTSPEED', speed)
         self.tilt_speed = speed
-        return await self.send(proto.cmd_tilt_speed(speed))
+        return resp
 
     async def tilt_stop(self) -> Optional[str]:
         return await self.send(proto.cmd_tilt_stop())
@@ -197,11 +230,30 @@ class DialAxisTurntable:
         await asyncio.sleep(0.05)
         await self.tilt_zero()
         if wait:
-            await self.wait_until_idle()
+            await self.wait_until_idle(timeout=self.motion_timeout(SequenceStep('zero')))
 
     async def get_rotation_angle(self) -> Optional[int]:
         resp = await self.send(proto.cmd_query_rotation_angle())
         return proto.parse_data_int(resp)
+
+    def motion_timeout(
+        self,
+        step: SequenceStep,
+        state: Optional[MotionState] = None,
+        base_timeout: Optional[float] = DEFAULT_WAIT_TIMEOUT_S,
+    ) -> Optional[float]:
+        """Settle timeout for *step* at the configured speeds; None when *base_timeout* is None.
+
+        Only speeds set through this client count; a raw ``send`` of TURNSPEED is not seen.
+        """
+        return step_timeout(
+            step,
+            base_timeout=base_timeout,
+            current_tilt=state.tilt if state else None,
+            current_rotation=state.rotation if state else None,
+            min_speed_deg_s=proto.degrees_per_second(self.rotation_speed) * TIMEOUT_SPEED_FRACTION,
+            tilt_min_speed_deg_s=proto.degrees_per_second(self.tilt_speed) * TIMEOUT_SPEED_FRACTION,
+        )
 
     async def get_rotation_speed(self) -> Optional[float]:
         resp = await self.send(proto.cmd_query_rotation_speed())
@@ -235,16 +287,18 @@ class DialAxisTurntable:
 
     async def wait_until_idle(
         self,
-        timeout: float = DEFAULT_WAIT_TIMEOUT_S,
+        timeout: Optional[float] = DEFAULT_WAIT_TIMEOUT_S,
         poll_interval: float = DEFAULT_POLL_INTERVAL_S,
         settle_polls: int = DEFAULT_SETTLE_POLLS,
         start_grace: float = DEFAULT_START_GRACE_S,
         epsilon: float = DEFAULT_EPSILON_DEG,
+        on_poll: Optional[Callable[[MotionState], None]] = None,
     ) -> MotionState:
         """Poll both axes until neither moves more than *epsilon* for *settle_polls* polls.
 
-        The device may start moving late, so stillness only counts once motion
-        was seen or *start_grace* seconds passed. Raises :class:`MotionTimeoutError`.
+        The device may start moving late, so stillness only counts once motion was
+        seen or *start_grace* seconds passed. *on_poll* gets every reading; *timeout*
+        None waits for stillness alone. Raises :class:`MotionTimeoutError`.
         """
         loop = asyncio.get_running_loop()
         start = loop.time()
@@ -253,6 +307,8 @@ class DialAxisTurntable:
         moved = False
         while True:
             state = await self.get_motion_state()
+            if on_poll is not None:
+                on_poll(state)
             if previous is not None:
                 if _axis_changed(previous.rotation, state.rotation, epsilon) or _axis_changed(
                     previous.tilt, state.tilt, epsilon
@@ -265,7 +321,7 @@ class DialAxisTurntable:
             elapsed = loop.time() - start
             if stable >= settle_polls and (moved or elapsed >= start_grace):
                 return state
-            if elapsed >= timeout:
+            if timeout is not None and elapsed >= timeout:
                 raise MotionTimeoutError(
                     f'Motion did not settle within {timeout}s (last {state})', state
                 )
@@ -276,23 +332,27 @@ class DialAxisTurntable:
         steps: Iterable[StepLike],
         on_progress: Optional[Callable[[int, MotionState], None]] = None,
         *,
-        base_timeout: float = DEFAULT_WAIT_TIMEOUT_S,
+        base_timeout: Optional[float] = DEFAULT_WAIT_TIMEOUT_S,
         poll_interval: float = DEFAULT_POLL_INTERVAL_S,
+        on_poll: Optional[Callable[[int, MotionState, StepProgress], None]] = None,
     ) -> MotionState:
         """Run steps in order, each settling before the next; returns the final state.
 
-        *on_progress* gets ``(step_index, state)`` after each step. Each wait's
-        timeout scales with travel (:func:`librevolve.sequence.step_timeout`).
+        *on_progress* gets ``(step_index, state)`` after each step, *on_poll*
+        ``(step_index, state, StepProgress)`` on every reading while it moves. Each
+        wait's timeout follows travel and the configured speed (:meth:`motion_timeout`);
+        *base_timeout* None waits for stillness alone.
         """
         plan: List[SequenceStep] = make_steps(steps)
         state = await self.get_motion_state()
         for index, step in enumerate(plan):
-            timeout = step_timeout(
-                step,
-                base_timeout=base_timeout,
-                current_tilt=state.tilt,
-                current_rotation=state.rotation,
-            )
+            timeout = self.motion_timeout(step, state, base_timeout)
+            tracker = StepTracker(step, state.rotation, state.tilt)
+
+            def report(reading: MotionState, index: int = index, tracker: StepTracker = tracker) -> None:
+                if on_poll is not None:
+                    on_poll(index, reading, tracker.update(reading.rotation, reading.tilt))
+
             if step.action == 'wait':
                 await asyncio.sleep(step.value)
                 state = await self.get_motion_state()
@@ -303,7 +363,9 @@ class DialAxisTurntable:
                     await self.tilt(step.value)
                 else:
                     await self.zero()
-                state = await self.wait_until_idle(timeout=timeout, poll_interval=poll_interval)
+                state = await self.wait_until_idle(
+                    timeout=timeout, poll_interval=poll_interval, on_poll=report
+                )
             if on_progress is not None:
                 on_progress(index, state)
         return state

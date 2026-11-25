@@ -9,8 +9,15 @@ SERVICE_UUID = '0000ffe0-0000-1000-8000-00805f9b34fb'
 CHARACTERISTIC_UUID = '0000ffe1-0000-1000-8000-00805f9b34fb'
 
 DEFAULT_READ_DELAY_S = 0.03
+
+# TURNSPEED / TILTSPEED are seconds per 360 degrees, so a larger value is slower.
+# Limits are the device's accepted range; it answers +FAIL outside them.
 DEFAULT_ROTATION_SPEED = 50.0
-DEFAULT_TILT_SPEED = 15.0
+DEFAULT_TILT_SPEED = 40.0
+ROTATION_SPEED_MIN = 17.4
+ROTATION_SPEED_MAX = 9999.0
+TILT_SPEED_MIN = 40.0
+TILT_SPEED_MAX = 999999.0
 
 TILT_MIN = -30.0
 TILT_MAX = 30.0
@@ -32,6 +39,11 @@ def cmd_turn_angle(degrees: float) -> str:
 
 def cmd_turn_speed(speed: float) -> str:
     return f'+CT,TURNSPEED={_format_value(speed)};'
+
+
+def degrees_per_second(speed: float) -> float:
+    """Axis rate for a TURNSPEED / TILTSPEED value."""
+    return 360.0 / speed
 
 
 def cmd_turn_continue(direction: int) -> str:

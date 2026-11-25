@@ -88,3 +88,15 @@ async def test_rotate_default_does_not_poll():
     device = ScriptedDevice(['+DATA=0.0;'], [TILT_IDLE])
     await _turntable(device).rotate(20)
     assert device.sent == ['+CT,TURNANGLE=20;']
+
+
+async def test_no_timeout_waits_for_stillness_and_reports_each_poll():
+    moving = [f'+DATA={i}.0;' for i in range(50)]
+    device = ScriptedDevice(moving, [TILT_IDLE])
+    seen = []
+    state = await _turntable(device).wait_until_idle(
+        timeout=None, poll_interval=0.001, settle_polls=3, on_poll=seen.append
+    )
+    assert state.rotation == 49.0
+    assert [s.rotation for s in seen[:3]] == [0.0, 1.0, 2.0]
+    assert len(seen) >= 50

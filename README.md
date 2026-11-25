@@ -101,8 +101,30 @@ Use `LIBREVOLVE_DEVICE=AA:BB:CC:DD:EE:FF` to skip scanning.
 print `rotation=… tilt=…`, send STOP and disconnect. They poll both angles every
 0.25 s and treat the table as idle after 4 unchanged polls (±0.05°). Motion can
 start a moment after `+OK;`, so a still table only counts as idle once it has
-moved or 1.5 s have passed. `--wait-timeout SECONDS` (default 120) sets how long
-to wait; on timeout the command exits 1.
+moved or 1.5 s have passed. A move's timeout grows with its travel and the
+configured speed (below); `--wait-timeout SECONDS` (default 120) is the floor.
+On timeout the command exits 1.
+
+Speed: `revolve --speed 131 --tilt-speed 131 rotate 380` sets the speeds at
+connect (every connect sets them; defaults 50 and 40). Both are **seconds per
+360°**, so a larger value is slower: rotation 17.4..9999 (20.7..0.036 °/s),
+tilt 40..999999. Measured on a DAT, °/s = 360 / value within ~2 %:
+
+| TURNSPEED | °/s  | TILTSPEED | °/s  |
+|-----------|------|-----------|------|
+| 17.5      | 20   | 40        | 10   |
+| 50        | 7.3  | 90        | 4.2  |
+| 131       | 2.76 | 131       | 2.9  |
+| 360       | 1.0  | 360       | 1.06 |
+| 3600      | 0.1  |           |      |
+
+A new speed applies at once, even to a move or spin already running. Values
+outside the range answer `+FAIL,ERR=004;` (rotation) or `+FAIL,ERR=007;`
+(tilt), and `set_rotation_speed` / `set_tilt_speed` raise `ValueError`.
+`+QT,TURNSPEED;` / `+QR,TILTSPEED;` answer the same constant fields whatever
+the setting, so they cannot confirm it.
+Idle detection needs the 0.1° reading to change within 4 polls (1 s), so above
+about 1800 s per turn (0.2 °/s) a slow move can be taken as finished early.
 
 `--no-wait` sends the move and disconnects without STOP, so the table finishes
 the move after the CLI exits (fire-and-return). `spin` does the same with
@@ -121,9 +143,10 @@ also disconnects without STOP, so it can watch a spin or a `--no-wait` move.
 Steps are separated by spaces or commas; a malformed step or out-of-range tilt
 is rejected before anything moves (exit 2). Each step prints
 `[i/n] step: rotation=… tilt=…`. Ctrl-C stops the table and exits 130. A step's
-timeout is `max(--wait-timeout, travel / 3 deg/s + 15 s)`: 3 deg/s is half the
-~6.5 deg/s measured at the default speed, so `r380` (about 60 s) gets 142 s.
-If you lower the rotation speed, raise `--wait-timeout` to match.
+timeout is `max(--wait-timeout, 2 × travel / (360 / speed) + 15 s)`: twice the
+time the move takes at the configured speed, so `r380` at the default 50
+(about 53 s) gets 121 s and at 131 (about 138 s) gets 292 s. A slow speed never
+times out early; a table still moving past that point is treated as stuck.
 
 The reported rotation wraps at ±360: after `rotate 380` from 57 it reads 77.
 Tilt is read from `+QR,TILTVALUE;`.
@@ -144,8 +167,13 @@ await tt.run_sequence(parse_sequence("r20 t5 r-20 t0"))
 
 `run_sequence` validates every step first and raises `SequenceError`
 (a `ValueError`) on bad input; `on_progress(step_index, MotionState)` runs after
-each step settles. `SyncDialAxisTurntable` has the same `spin`, `run_sequence`
-and `disconnect(stop=...)`; its `on_progress` runs on the library's loop thread.
+each step settles. `on_poll(step_index, MotionState, StepProgress)` runs on
+every reading while a step moves; `StepProgress(done, total)` is degrees, with
+rotation accumulated across the ±360 wrap. `base_timeout=None` drops the
+timeout and waits for stillness alone; `wait_until_idle(timeout=None,
+on_poll=...)` does the same for a single move. `SyncDialAxisTurntable` has the
+same `spin`, `run_sequence`, `set_rotation_speed`, `set_tilt_speed` and
+`disconnect(stop=...)`; its callbacks run on the library's loop thread.
 
 ## Protocol
 
@@ -165,7 +193,7 @@ Write command → wait ~30 ms → read characteristic → response often `+DATA=
 | Command | Description |
 |---------|-------------|
 | `+CT,TURNANGLE=X;` | Rotate incrementally by X degrees |
-| `+CT,TURNSPEED=X;` | Set rotation speed (35.64–131 in DATRAPP UI) |
+| `+CT,TURNSPEED=X;` | Seconds per turn, 17.4–9999 (35.64–131 in DATRAPP UI) |
 | `+CT,TURNCONTINUE=X;` | Continuous rotation (1=right, -1=left) |
 | `+CT,TOZERO;` | Return rotation to boot zero |
 | `+CT,STOP;` | Stop rotation |
@@ -175,7 +203,7 @@ Write command → wait ~30 ms → read characteristic → response often `+DATA=
 | Command | Description |
 |---------|-------------|
 | `+CR,TILTVALUE=X;` | Absolute tilt -30…+30° |
-| `+CR,TILTSPEED=X;` | Set tilt speed (9–35 in DATRAPP UI) |
+| `+CR,TILTSPEED=X;` | Seconds per 360°, 40–999999 (DATRAPP UI shows 9–35) |
 | `+CR,TOZERO;` | Return tilt to zero |
 | `+CR,STOP;` | Stop tilt |
 
@@ -184,10 +212,10 @@ Write command → wait ~30 ms → read characteristic → response often `+DATA=
 | Command | Response |
 |---------|----------|
 | `+QT,CHANGEANGLE;` | `+DATA=<degrees>;` rotation tracker |
-| `+QT,TURNSPEED;` | Current rotation speed |
+| `+QT,TURNSPEED;` | `+DATA=17.5,90.0,2.0;` whatever the setting |
 | `+QR,TILTANGLE;` | `+DATA=-30,30,X;` limits; X does not follow motion |
 | `+QR,TILTVALUE;` | Current tilt (live) |
-| `+QR,TILTSPEED;` | Current tilt speed |
+| `+QR,TILTSPEED;` | `+DATA=6.8,90.0,1.0;` whatever the setting |
 
 ## C library (optional)
 
