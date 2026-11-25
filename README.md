@@ -99,14 +99,22 @@ Use `LIBREVOLVE_DEVICE=AA:BB:CC:DD:EE:FF` to skip scanning.
 
 `rotate`, `tilt` and `zero` stay connected until the table stops moving, then
 print `rotation=… tilt=…`, send STOP and disconnect. They poll both angles every
-0.25 s and treat the table as idle after 4 unchanged polls (±0.05°). Motion can
-start a moment after `+OK;`, so a still table only counts as idle once it has
-moved or 1.5 s have passed. A move's timeout grows with its travel and the
-configured speed (below); `--wait-timeout SECONDS` (default 120) is the floor.
-On timeout the command exits 1.
+0.25 s and treat the table as idle after 4 unchanged polls (±0.05°), held for
+at least the time the moving axis needs to travel 0.3° (three steps of the 0.1°
+reading) at the configured speed: 1 s up to about 1800 s per turn, 8.3 s at
+9999. Motion can start a moment after `+OK;`, so a still table only counts as
+idle once it has moved or that window (at least 1.5 s) has passed. A move's
+timeout grows with its travel and the configured speed (below);
+`--wait-timeout SECONDS` (default 120) is the floor. On timeout the command
+exits 1.
 
 Speed: `revolve --speed 131 --tilt-speed 131 rotate 380` sets the speeds at
-connect (every connect sets them; defaults 50 and 40). Both are **seconds per
+connect. Without `--speed` / `--tilt-speed` nothing is sent, so `revolve angle`
+or `revolve stop` cannot change a running spin's speed; the device keeps
+whatever speed it last had, and since that cannot be read back, waits then
+have no timeout and the plain 4-poll stillness test. In Python the same holds
+for `DialAxisTurntable(rotation_speed=..., tilt_speed=...)`: given speeds are
+sent at every connect, omitted ones never. Both are **seconds per
 360°**, so a larger value is slower: rotation 17.4..9999 (20.7..0.036 °/s),
 tilt 40..999999. Measured on a DAT, °/s = 360 / value within ~2 %:
 
@@ -123,8 +131,6 @@ outside the range answer `+FAIL,ERR=004;` (rotation) or `+FAIL,ERR=007;`
 (tilt), and `set_rotation_speed` / `set_tilt_speed` raise `ValueError`.
 `+QT,TURNSPEED;` / `+QR,TILTSPEED;` answer the same constant fields whatever
 the setting, so they cannot confirm it.
-Idle detection needs the 0.1° reading to change within 4 polls (1 s), so above
-about 1800 s per turn (0.2 °/s) a slow move can be taken as finished early.
 
 `--no-wait` sends the move and disconnects without STOP, so the table finishes
 the move after the CLI exits (fire-and-return). `spin` does the same with
@@ -144,7 +150,7 @@ Steps are separated by spaces or commas; a malformed step or out-of-range tilt
 is rejected before anything moves (exit 2). Each step prints
 `[i/n] step: rotation=… tilt=…`. Ctrl-C stops the table and exits 130. A step's
 timeout is `max(--wait-timeout, 2 × travel / (360 / speed) + 15 s)`: twice the
-time the move takes at the configured speed, so `r380` at the default 50
+time the move takes at the configured speed, so `r380` at speed 50
 (about 53 s) gets 121 s and at 131 (about 138 s) gets 292 s. A slow speed never
 times out early; a table still moving past that point is treated as stuck.
 
@@ -171,7 +177,8 @@ each step settles. `on_poll(step_index, MotionState, StepProgress)` runs on
 every reading while a step moves; `StepProgress(done, total)` is degrees, with
 rotation accumulated across the ±360 wrap. `base_timeout=None` drops the
 timeout and waits for stillness alone; `wait_until_idle(timeout=None,
-on_poll=...)` does the same for a single move. `SyncDialAxisTurntable` has the
+on_poll=...)` does the same for a single move. `wait_for_step(step)` waits with the
+timeout and stillness window (`settle_time`) scaled to the configured speed. `SyncDialAxisTurntable` has the
 same `spin`, `run_sequence`, `set_rotation_speed`, `set_tilt_speed` and
 `disconnect(stop=...)`; its callbacks run on the library's loop thread.
 

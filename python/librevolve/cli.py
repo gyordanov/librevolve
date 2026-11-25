@@ -48,7 +48,7 @@ async def _wait_for_motion(tt: DialAxisTurntable, args: argparse.Namespace, step
     if args.no_wait:
         return 0
     try:
-        state = await tt.wait_until_idle(timeout=tt.motion_timeout(step, base_timeout=args.wait_timeout))
+        state = await tt.wait_for_step(step, base_timeout=args.wait_timeout)
     except MotionTimeoutError as exc:
         print(exc, file=sys.stderr)
         return 1
@@ -162,16 +162,15 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         '--speed',
         type=float,
-        default=proto.DEFAULT_ROTATION_SPEED,
         help=f'Rotation speed set at connect, seconds per turn, larger is slower '
-        f'({proto.ROTATION_SPEED_MIN:g}..{proto.ROTATION_SPEED_MAX:g}, default: %(default)s)',
+        f'({proto.ROTATION_SPEED_MIN:g}..{proto.ROTATION_SPEED_MAX:g}; '
+        f'default: leave the device speed; waits then end on stillness alone)',
     )
     parser.add_argument(
         '--tilt-speed',
         type=float,
-        default=proto.DEFAULT_TILT_SPEED,
         help=f'Tilt speed set at connect, seconds per 360 degrees '
-        f'({proto.TILT_SPEED_MIN:g}..{proto.TILT_SPEED_MAX:g}, default: %(default)s)',
+        f'({proto.TILT_SPEED_MIN:g}..{proto.TILT_SPEED_MAX:g}; default: leave the device speed)',
     )
     sub = parser.add_subparsers(dest='command', required=True)
 

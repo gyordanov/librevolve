@@ -136,6 +136,7 @@ class SyncDialAxisTurntable:
         start_grace: float = DEFAULT_START_GRACE_S,
         epsilon: float = DEFAULT_EPSILON_DEG,
         on_poll: Optional[Callable[[MotionState], None]] = None,
+        settle_time: Optional[float] = None,
     ) -> MotionState:
         return self._run(
             self._tt.wait_until_idle(
@@ -145,6 +146,7 @@ class SyncDialAxisTurntable:
                 start_grace=start_grace,
                 epsilon=epsilon,
                 on_poll=on_poll,
+                settle_time=settle_time,
             ),
             timeout=None if timeout is None else timeout + _WAIT_SLACK_S,
         )

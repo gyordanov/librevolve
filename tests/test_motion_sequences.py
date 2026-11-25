@@ -195,15 +195,18 @@ async def test_run_sequence_timeout_follows_configured_speed(monkeypatch):
     device = SimulatedTable(step=10.0)
     tt = _turntable(device)
     tt.rotation_speed = proto.ROTATION_SPEED_MAX
-    timeouts = []
+    timeouts, settle_times = [], []
     real_wait = tt.wait_until_idle
 
     async def spy(**kwargs):
         timeouts.append(kwargs['timeout'])
+        settle_times.append(kwargs['settle_time'])
+        kwargs['settle_time'] = None
         return await real_wait(**kwargs)
 
     monkeypatch.setattr(tt, 'wait_until_idle', spy)
     await tt.run_sequence([('rotate', 380)], poll_interval=0.001)
     assert timeouts[0] >= 2 * 380 / proto.degrees_per_second(proto.ROTATION_SPEED_MAX)
+    assert settle_times[0] == pytest.approx(0.3 / proto.degrees_per_second(proto.ROTATION_SPEED_MAX))
     await tt.run_sequence([('rotate', 10)], poll_interval=0.001, base_timeout=None)
     assert timeouts[1] is None
