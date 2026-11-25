@@ -7,7 +7,19 @@ import threading
 from concurrent.futures import TimeoutError as FuturesTimeoutError
 from typing import List, Optional, Tuple
 
-from librevolve.client import DialAxisTurntable, TurntableNotConnectedError
+from librevolve.client import (
+    DEFAULT_EPSILON_DEG,
+    DEFAULT_POLL_INTERVAL_S,
+    DEFAULT_SETTLE_POLLS,
+    DEFAULT_START_GRACE_S,
+    DEFAULT_WAIT_TIMEOUT_S,
+    DialAxisTurntable,
+    MotionState,
+    TurntableNotConnectedError,
+)
+
+# Slack over the motion timeout so MotionTimeoutError, not the loop-bridge timeout, reports it.
+_WAIT_SLACK_S = 15.0
 
 
 class SyncDialAxisTurntable:
@@ -68,17 +80,39 @@ class SyncDialAxisTurntable:
     def send(self, cmd: str) -> Optional[str]:
         return self._run(self._tt.send(cmd))
 
-    def rotate(self, degrees: float) -> Optional[str]:
-        return self._run(self._tt.rotate(degrees))
+    def rotate(self, degrees: float, *, wait: bool = False) -> Optional[str]:
+        return self._run(self._tt.rotate(degrees, wait=wait), timeout=DEFAULT_WAIT_TIMEOUT_S + _WAIT_SLACK_S)
 
-    def tilt(self, degrees: float) -> Optional[str]:
-        return self._run(self._tt.tilt(degrees))
+    def tilt(self, degrees: float, *, wait: bool = False) -> Optional[str]:
+        return self._run(self._tt.tilt(degrees, wait=wait), timeout=DEFAULT_WAIT_TIMEOUT_S + _WAIT_SLACK_S)
 
     def stop(self) -> None:
         self._run(self._tt.stop())
 
-    def zero(self) -> None:
-        self._run(self._tt.zero())
+    def zero(self, *, wait: bool = False) -> None:
+        self._run(self._tt.zero(wait=wait), timeout=DEFAULT_WAIT_TIMEOUT_S + _WAIT_SLACK_S)
+
+    def get_motion_state(self) -> MotionState:
+        return self._run(self._tt.get_motion_state())
+
+    def wait_until_idle(
+        self,
+        timeout: float = DEFAULT_WAIT_TIMEOUT_S,
+        poll_interval: float = DEFAULT_POLL_INTERVAL_S,
+        settle_polls: int = DEFAULT_SETTLE_POLLS,
+        start_grace: float = DEFAULT_START_GRACE_S,
+        epsilon: float = DEFAULT_EPSILON_DEG,
+    ) -> MotionState:
+        return self._run(
+            self._tt.wait_until_idle(
+                timeout=timeout,
+                poll_interval=poll_interval,
+                settle_polls=settle_polls,
+                start_grace=start_grace,
+                epsilon=epsilon,
+            ),
+            timeout=timeout + _WAIT_SLACK_S,
+        )
 
     def get_rotation_angle(self) -> Optional[int]:
         return self._run(self._tt.get_rotation_angle())

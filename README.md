@@ -95,6 +95,18 @@ revolve disconnect
 
 Use `LIBREVOLVE_DEVICE=AA:BB:CC:DD:EE:FF` to skip scanning.
 
+`rotate`, `tilt` and `zero` stay connected until the table stops moving, then
+print `rotation=… tilt=…` and disconnect. Disconnecting sends STOP, so leaving
+any earlier cancels the move. They poll both angles every 0.25 s and treat the
+table as idle after 4 unchanged polls (±0.05°). Motion can start a moment after
+`+OK;`, so a still table only counts as idle once it has moved or 1.5 s have
+passed. `--wait-timeout SECONDS` (default 120) sets how long to wait; on timeout
+the command exits 1. `--no-wait` returns as soon as the command is acknowledged.
+
+From Python: `await tt.wait_until_idle()` (or `rotate(..., wait=True)`; the
+same on `SyncDialAxisTurntable`) returns a `MotionState(rotation, tilt)` and
+raises `MotionTimeoutError` on timeout.
+
 ## Protocol
 
 Nordic UART-style GATT bridge:

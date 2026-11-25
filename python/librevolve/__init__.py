@@ -1,6 +1,12 @@
 """Revopoint Dual-Axis Turntable (DAT) Bluetooth control."""
 
-from librevolve.client import DialAxisTurntable, TurntableNotConnectedError, TurntableNotFoundError
+from librevolve.client import (
+    DialAxisTurntable,
+    MotionState,
+    MotionTimeoutError,
+    TurntableNotConnectedError,
+    TurntableNotFoundError,
+)
 from librevolve.discovery import (
     TurntableDevice,
     discover_turntables,
@@ -19,6 +25,8 @@ from librevolve.sync import SyncDialAxisTurntable
 
 __all__ = [
     'DialAxisTurntable',
+    'MotionState',
+    'MotionTimeoutError',
     'SyncDialAxisTurntable',
     'TurntableDevice',
     'TurntableNotConnectedError',

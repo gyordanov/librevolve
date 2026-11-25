@@ -7,7 +7,12 @@ import asyncio
 import os
 import sys
 
-from librevolve.client import DialAxisTurntable, TurntableNotFoundError
+from librevolve.client import (
+    DEFAULT_WAIT_TIMEOUT_S,
+    DialAxisTurntable,
+    MotionTimeoutError,
+    TurntableNotFoundError,
+)
 from librevolve.discovery import discover_turntables
 
 
@@ -37,12 +42,25 @@ async def _cmd_disconnect(tt: DialAxisTurntable, _args: argparse.Namespace) -> i
     return 0
 
 
+async def _wait_for_motion(tt: DialAxisTurntable, args: argparse.Namespace) -> int:
+    # Disconnecting sends STOP, so returning before the move ends would cancel it.
+    if args.no_wait:
+        return 0
+    try:
+        state = await tt.wait_until_idle(timeout=args.wait_timeout)
+    except MotionTimeoutError as exc:
+        print(exc, file=sys.stderr)
+        return 1
+    print(f'rotation={state.rotation} tilt={state.tilt}')
+    return 0
+
+
 async def _cmd_rotate(tt: DialAxisTurntable, args: argparse.Namespace) -> int:
     await _ensure_connected(tt, args)
     resp = await tt.rotate(args.degrees)
     if resp:
         print(resp)
-    return 0
+    return await _wait_for_motion(tt, args)
 
 
 async def _cmd_tilt(tt: DialAxisTurntable, args: argparse.Namespace) -> int:
@@ -50,7 +68,7 @@ async def _cmd_tilt(tt: DialAxisTurntable, args: argparse.Namespace) -> int:
     resp = await tt.tilt(args.degrees)
     if resp:
         print(resp)
-    return 0
+    return await _wait_for_motion(tt, args)
 
 
 async def _cmd_angle(tt: DialAxisTurntable, args: argparse.Namespace) -> int:
@@ -72,7 +90,7 @@ async def _cmd_stop(tt: DialAxisTurntable, args: argparse.Namespace) -> int:
 async def _cmd_zero(tt: DialAxisTurntable, args: argparse.Namespace) -> int:
     await _ensure_connected(tt, args)
     await tt.zero()
-    return 0
+    return await _wait_for_motion(tt, args)
 
 
 async def _cmd_send(tt: DialAxisTurntable, args: argparse.Namespace) -> int:
@@ -86,6 +104,20 @@ async def _cmd_send(tt: DialAxisTurntable, args: argparse.Namespace) -> int:
 async def _ensure_connected(tt: DialAxisTurntable, args: argparse.Namespace) -> None:
     if not tt.is_connected:
         await tt.connect(address=getattr(args, 'address', None) or _device_address())
+
+
+def _add_wait_args(p: argparse.ArgumentParser) -> None:
+    p.add_argument(
+        '--no-wait',
+        action='store_true',
+        help='Return right after the command is acknowledged (the disconnect STOP will likely cancel the move)',
+    )
+    p.add_argument(
+        '--wait-timeout',
+        type=float,
+        default=DEFAULT_WAIT_TIMEOUT_S,
+        help='Seconds to wait for motion to settle (default: %(default)s)',
+    )
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -105,17 +137,21 @@ def _build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser('rotate', help='Rotate by degrees')
     p.add_argument('degrees', type=float)
+    _add_wait_args(p)
     p.set_defaults(func=_cmd_rotate)
 
     p = sub.add_parser('tilt', help='Set absolute tilt (-30..30)')
     p.add_argument('degrees', type=float)
+    _add_wait_args(p)
     p.set_defaults(func=_cmd_tilt)
 
     p = sub.add_parser('angle', help='Query rotation angle')
     p.set_defaults(func=_cmd_angle)
 
     sub.add_parser('stop', help='Stop both axes').set_defaults(func=_cmd_stop)
-    sub.add_parser('zero', help='Return both axes to zero').set_defaults(func=_cmd_zero)
+    p = sub.add_parser('zero', help='Return both axes to zero')
+    _add_wait_args(p)
+    p.set_defaults(func=_cmd_zero)
 
     p = sub.add_parser('send', help='Send raw protocol command')
     p.add_argument('command', help='e.g. "+CT,TURNANGLE=45;"')

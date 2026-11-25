@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import re
-from typing import Optional
+from typing import List, Optional
 
 SERVICE_UUID = '0000ffe0-0000-1000-8000-00805f9b34fb'
 CHARACTERISTIC_UUID = '0000ffe1-0000-1000-8000-00805f9b34fb'
@@ -16,6 +16,7 @@ TILT_MIN = -30.0
 TILT_MAX = 30.0
 
 _DATA_RE = re.compile(r'^\+DATA=(?P<value>[-+0-9.]+);?\s*$', re.IGNORECASE)
+_DATA_FIELDS_RE = re.compile(r'^\+DATA=(?P<fields>[-+0-9.]+(?:,[-+0-9.]+)*);?\s*$', re.IGNORECASE)
 
 
 def _format_value(value: float) -> str:
@@ -103,3 +104,25 @@ def parse_data_int(response: Optional[str]) -> Optional[int]:
     if value is None:
         return None
     return int(round(value))
+
+
+def parse_data_fields(response: Optional[str]) -> Optional[List[float]]:
+    """Parse ``+DATA=<n>[,<n>...];`` into floats; None if malformed."""
+    if not response:
+        return None
+    match = _DATA_FIELDS_RE.match(response.strip())
+    if not match:
+        return None
+    try:
+        return [float(field) for field in match.group('fields').split(',')]
+    except ValueError:
+        return None
+
+
+def parse_data_last(response: Optional[str]) -> Optional[float]:
+    """Last field of a ``+DATA=`` response.
+
+    Multi-value queries such as ``+QR,TILTANGLE;`` answer ``min,max,current``.
+    """
+    fields = parse_data_fields(response)
+    return fields[-1] if fields else None

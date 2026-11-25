@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+from dataclasses import dataclass
 from typing import List, Optional, Tuple
 
 from bleak import BleakClient
@@ -21,6 +22,35 @@ class TurntableNotFoundError(Exception):
 
 class TurntableNotConnectedError(Exception):
     """Operation requires an active BLE connection."""
+
+
+class MotionTimeoutError(TimeoutError):
+    """Motion did not settle in time; ``state`` holds the last reading."""
+
+    def __init__(self, message: str, state: 'MotionState') -> None:
+        super().__init__(message)
+        self.state = state
+
+
+@dataclass(frozen=True)
+class MotionState:
+    """Axis angles in degrees; None where the device gave no parseable answer."""
+
+    rotation: Optional[float]
+    tilt: Optional[float]
+
+
+DEFAULT_WAIT_TIMEOUT_S = 120.0
+DEFAULT_POLL_INTERVAL_S = 0.25
+DEFAULT_SETTLE_POLLS = 4
+DEFAULT_START_GRACE_S = 1.5
+DEFAULT_EPSILON_DEG = 0.05
+
+
+def _axis_changed(old: Optional[float], new: Optional[float], epsilon: float) -> bool:
+    if old is None or new is None:
+        return False
+    return abs(new - old) > epsilon
 
 
 class DialAxisTurntable:
@@ -112,8 +142,12 @@ class DialAxisTurntable:
             logger.debug('RX %s', response)
             return response or None
 
-    async def rotate(self, degrees: float) -> Optional[str]:
-        return await self.send(proto.cmd_turn_angle(degrees))
+    async def rotate(self, degrees: float, *, wait: bool = False) -> Optional[str]:
+        """Rotate by *degrees*; with *wait*, block until :meth:`wait_until_idle`."""
+        resp = await self.send(proto.cmd_turn_angle(degrees))
+        if wait:
+            await self.wait_until_idle()
+        return resp
 
     async def set_rotation_speed(self, speed: float) -> Optional[str]:
         self.rotation_speed = speed
@@ -125,8 +159,12 @@ class DialAxisTurntable:
     async def rotation_zero(self) -> Optional[str]:
         return await self.send(proto.cmd_rotation_zero())
 
-    async def tilt(self, degrees: float) -> Optional[str]:
-        return await self.send(proto.cmd_tilt_value(degrees))
+    async def tilt(self, degrees: float, *, wait: bool = False) -> Optional[str]:
+        """Tilt to absolute *degrees*; with *wait*, block until :meth:`wait_until_idle`."""
+        resp = await self.send(proto.cmd_tilt_value(degrees))
+        if wait:
+            await self.wait_until_idle()
+        return resp
 
     async def set_tilt_speed(self, speed: float) -> Optional[str]:
         self.tilt_speed = speed
@@ -143,10 +181,12 @@ class DialAxisTurntable:
         await asyncio.sleep(0.05)
         await self.tilt_stop()
 
-    async def zero(self) -> None:
+    async def zero(self, *, wait: bool = False) -> None:
         await self.rotation_zero()
         await asyncio.sleep(0.05)
         await self.tilt_zero()
+        if wait:
+            await self.wait_until_idle()
 
     async def get_rotation_angle(self) -> Optional[int]:
         resp = await self.send(proto.cmd_query_rotation_angle())
@@ -158,7 +198,7 @@ class DialAxisTurntable:
 
     async def get_tilt_angle(self) -> Optional[float]:
         resp = await self.send(proto.cmd_query_tilt_angle())
-        value = proto.parse_data_value(resp)
+        value = proto.parse_data_last(resp)
         if value is not None:
             return value
         resp = await self.send(proto.cmd_query_tilt_value())
@@ -178,3 +218,47 @@ class DialAxisTurntable:
                 return True
             await asyncio.sleep(poll_interval_s)
         return False
+
+    async def get_motion_state(self) -> MotionState:
+        """Read both axes; rotation keeps the device's 0.1-degree resolution."""
+        rotation = proto.parse_data_last(await self.send(proto.cmd_query_rotation_angle()))
+        tilt = proto.parse_data_last(await self.send(proto.cmd_query_tilt_angle()))
+        return MotionState(rotation=rotation, tilt=tilt)
+
+    async def wait_until_idle(
+        self,
+        timeout: float = DEFAULT_WAIT_TIMEOUT_S,
+        poll_interval: float = DEFAULT_POLL_INTERVAL_S,
+        settle_polls: int = DEFAULT_SETTLE_POLLS,
+        start_grace: float = DEFAULT_START_GRACE_S,
+        epsilon: float = DEFAULT_EPSILON_DEG,
+    ) -> MotionState:
+        """Poll both axes until neither moves more than *epsilon* for *settle_polls* polls.
+
+        The device may start moving late, so stillness only counts once motion
+        was seen or *start_grace* seconds passed. Raises :class:`MotionTimeoutError`.
+        """
+        loop = asyncio.get_running_loop()
+        start = loop.time()
+        previous: Optional[MotionState] = None
+        stable = 0
+        moved = False
+        while True:
+            state = await self.get_motion_state()
+            if previous is not None:
+                if _axis_changed(previous.rotation, state.rotation, epsilon) or _axis_changed(
+                    previous.tilt, state.tilt, epsilon
+                ):
+                    moved = True
+                    stable = 0
+                elif state.rotation is not None or state.tilt is not None:
+                    stable += 1
+            previous = state
+            elapsed = loop.time() - start
+            if stable >= settle_polls and (moved or elapsed >= start_grace):
+                return state
+            if elapsed >= timeout:
+                raise MotionTimeoutError(
+                    f'Motion did not settle within {timeout}s (last {state})', state
+                )
+            await asyncio.sleep(poll_interval)

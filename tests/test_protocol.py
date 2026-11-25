@@ -38,3 +38,16 @@ def test_parse_data_float():
 def test_turn_continue_invalid():
     with pytest.raises(ValueError):
         proto.cmd_turn_continue(2)
+
+
+def test_parse_multi_value_tilt_takes_current_last_field():
+    assert proto.parse_data_fields('+DATA=-30.0,30.0,0.3;') == [-30.0, 30.0, 0.3]
+    assert proto.parse_data_last('+DATA=-30.0,30.0,0.3;') == 0.3
+    assert proto.parse_data_last('+DATA=-304.4;') == -304.4
+    assert proto.parse_data_last('+DATA=1,,2;') is None
+    assert proto.parse_data_last('+OK;') is None
+    assert proto.parse_data_last(None) is None
+
+
+def test_parse_data_value_stays_single_valued():
+    assert proto.parse_data_value('+DATA=17.5,90.0,2.0;') is None
