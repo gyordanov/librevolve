@@ -21,12 +21,15 @@ from librevolve.protocol import (
     DEFAULT_ROTATION_SPEED,
     DEFAULT_TILT_SPEED,
 )
+from librevolve.sequence import SequenceError, SequenceStep, parse_sequence
 from librevolve.sync import SyncDialAxisTurntable
 
 __all__ = [
     'DialAxisTurntable',
     'MotionState',
     'MotionTimeoutError',
+    'SequenceError',
+    'SequenceStep',
     'SyncDialAxisTurntable',
     'TurntableDevice',
     'TurntableNotConnectedError',
@@ -35,6 +38,7 @@ __all__ = [
     'discover_turntables_sync',
     'find_first_turntable',
     'find_first_turntable_sync',
+    'parse_sequence',
     'SERVICE_UUID',
     'CHARACTERISTIC_UUID',
     'DEFAULT_READ_DELAY_S',

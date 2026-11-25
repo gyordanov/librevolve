@@ -20,7 +20,7 @@ class ScriptedDevice:
         self.sent.append(cmd)
         if cmd == proto.cmd_query_rotation_angle():
             return self._next(self.rotation)
-        if cmd == proto.cmd_query_tilt_angle():
+        if cmd == proto.cmd_query_tilt_value():
             return self._next(self.tilt)
         return '+OK;'
 
@@ -32,7 +32,7 @@ def _turntable(device):
 
 
 FAST = dict(poll_interval=0.001, settle_polls=3, timeout=5.0)
-TILT_IDLE = '+DATA=-30.0,30.0,0.3;'
+TILT_IDLE = '+DATA=0.3;'
 
 
 async def test_returns_once_rotation_settles():
@@ -60,7 +60,7 @@ async def test_no_motion_returns_after_grace():
 async def test_tilt_motion_keeps_waiting():
     device = ScriptedDevice(
         ['+DATA=0.0;'],
-        ['+DATA=-30.0,30.0,0.0;', '+DATA=-30.0,30.0,2.0;', '+DATA=-30.0,30.0,4.0;'],
+        ['+DATA=0.0;', '+DATA=2.0;', '+DATA=4.0;'],
     )
     state = await _turntable(device).wait_until_idle(start_grace=10.0, **FAST)
     assert state.tilt == 4.0

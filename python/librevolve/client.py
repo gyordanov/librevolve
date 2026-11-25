@@ -6,12 +6,13 @@ import asyncio
 import logging
 import os
 from dataclasses import dataclass
-from typing import List, Optional, Tuple
+from typing import Callable, Iterable, List, Optional, Tuple
 
 from bleak import BleakClient
 
 from librevolve import protocol as proto
 from librevolve.discovery import TurntableDevice, discover_turntables, find_first_turntable
+from librevolve.sequence import SequenceStep, StepLike, make_steps, step_timeout
 
 logger = logging.getLogger(__name__)
 
@@ -114,13 +115,17 @@ class DialAxisTurntable:
         await self.set_rotation_speed(self.rotation_speed)
         await self.set_tilt_speed(self.tilt_speed)
 
-    async def disconnect(self) -> None:
-        """Stop motors and disconnect."""
+    async def disconnect(self, stop: bool = True) -> None:
+        """Disconnect, first stopping both motors unless *stop* is False.
+
+        With ``stop=False`` a move or spin already started keeps running on the device.
+        """
         if self._client is None:
             return
         if self._client.is_connected:
             try:
-                await self.stop()
+                if stop:
+                    await self.stop()
             except Exception:
                 logger.debug('Stop before disconnect failed', exc_info=True)
             await self._client.disconnect()
@@ -148,6 +153,12 @@ class DialAxisTurntable:
         if wait:
             await self.wait_until_idle()
         return resp
+
+    async def spin(self, direction: int = 1) -> Optional[str]:
+        """Rotate continuously (``+CT,TURNCONTINUE=±1;``) until :meth:`stop`."""
+        if direction not in (-1, 1):
+            raise ValueError('direction must be 1 or -1')
+        return await self.send(proto.cmd_turn_continue(direction))
 
     async def set_rotation_speed(self, speed: float) -> Optional[str]:
         self.rotation_speed = speed
@@ -197,12 +208,9 @@ class DialAxisTurntable:
         return proto.parse_data_value(resp)
 
     async def get_tilt_angle(self) -> Optional[float]:
-        resp = await self.send(proto.cmd_query_tilt_angle())
-        value = proto.parse_data_last(resp)
-        if value is not None:
-            return value
+        """Live tilt from ``+QR,TILTVALUE;``; TILTANGLE's last field does not follow motion."""
         resp = await self.send(proto.cmd_query_tilt_value())
-        return proto.parse_data_value(resp)
+        return proto.parse_data_last(resp)
 
     async def wait_rotation(
         self,
@@ -220,9 +228,9 @@ class DialAxisTurntable:
         return False
 
     async def get_motion_state(self) -> MotionState:
-        """Read both axes; rotation keeps the device's 0.1-degree resolution."""
+        """Read both axes; rotation keeps the device's 0.1-degree resolution and wraps at ±360."""
         rotation = proto.parse_data_last(await self.send(proto.cmd_query_rotation_angle()))
-        tilt = proto.parse_data_last(await self.send(proto.cmd_query_tilt_angle()))
+        tilt = await self.get_tilt_angle()
         return MotionState(rotation=rotation, tilt=tilt)
 
     async def wait_until_idle(
@@ -262,3 +270,40 @@ class DialAxisTurntable:
                     f'Motion did not settle within {timeout}s (last {state})', state
                 )
             await asyncio.sleep(poll_interval)
+
+    async def run_sequence(
+        self,
+        steps: Iterable[StepLike],
+        on_progress: Optional[Callable[[int, MotionState], None]] = None,
+        *,
+        base_timeout: float = DEFAULT_WAIT_TIMEOUT_S,
+        poll_interval: float = DEFAULT_POLL_INTERVAL_S,
+    ) -> MotionState:
+        """Run steps in order, each settling before the next; returns the final state.
+
+        *on_progress* gets ``(step_index, state)`` after each step. Each wait's
+        timeout scales with travel (:func:`librevolve.sequence.step_timeout`).
+        """
+        plan: List[SequenceStep] = make_steps(steps)
+        state = await self.get_motion_state()
+        for index, step in enumerate(plan):
+            timeout = step_timeout(
+                step,
+                base_timeout=base_timeout,
+                current_tilt=state.tilt,
+                current_rotation=state.rotation,
+            )
+            if step.action == 'wait':
+                await asyncio.sleep(step.value)
+                state = await self.get_motion_state()
+            else:
+                if step.action == 'rotate':
+                    await self.rotate(step.value)
+                elif step.action == 'tilt':
+                    await self.tilt(step.value)
+                else:
+                    await self.zero()
+                state = await self.wait_until_idle(timeout=timeout, poll_interval=poll_interval)
+            if on_progress is not None:
+                on_progress(index, state)
+        return state

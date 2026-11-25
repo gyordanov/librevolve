@@ -89,23 +89,63 @@ revolve connect
 revolve rotate 45
 revolve tilt -10
 revolve angle
+revolve spin            # rotate continuously; --left for the other way
 revolve stop
+revolve sequence "r380 t30 r380 t-30 r380"
 revolve disconnect
 ```
 
 Use `LIBREVOLVE_DEVICE=AA:BB:CC:DD:EE:FF` to skip scanning.
 
 `rotate`, `tilt` and `zero` stay connected until the table stops moving, then
-print `rotation=… tilt=…` and disconnect. Disconnecting sends STOP, so leaving
-any earlier cancels the move. They poll both angles every 0.25 s and treat the
-table as idle after 4 unchanged polls (±0.05°). Motion can start a moment after
-`+OK;`, so a still table only counts as idle once it has moved or 1.5 s have
-passed. `--wait-timeout SECONDS` (default 120) sets how long to wait; on timeout
-the command exits 1. `--no-wait` returns as soon as the command is acknowledged.
+print `rotation=… tilt=…`, send STOP and disconnect. They poll both angles every
+0.25 s and treat the table as idle after 4 unchanged polls (±0.05°). Motion can
+start a moment after `+OK;`, so a still table only counts as idle once it has
+moved or 1.5 s have passed. `--wait-timeout SECONDS` (default 120) sets how long
+to wait; on timeout the command exits 1.
+
+`--no-wait` sends the move and disconnects without STOP, so the table finishes
+the move after the CLI exits (fire-and-return). `spin` does the same with
+`+CT,TURNCONTINUE=±1;`: the table keeps turning until `revolve stop`. `angle`
+also disconnects without STOP, so it can watch a spin or a `--no-wait` move.
+
+`sequence` runs steps in order, each one waiting for the table to settle:
+
+| Step     | Meaning                                  |
+|----------|------------------------------------------|
+| `r<deg>` | rotate by `deg` (relative, may be > 360) |
+| `t<deg>` | tilt to `deg` (absolute, -30..30)        |
+| `z`      | return both axes to zero                 |
+| `w<sec>` | pause                                    |
+
+Steps are separated by spaces or commas; a malformed step or out-of-range tilt
+is rejected before anything moves (exit 2). Each step prints
+`[i/n] step: rotation=… tilt=…`. Ctrl-C stops the table and exits 130. A step's
+timeout is `max(--wait-timeout, travel / 3 deg/s + 15 s)`: 3 deg/s is half the
+~6.5 deg/s measured at the default speed, so `r380` (about 60 s) gets 142 s.
+If you lower the rotation speed, raise `--wait-timeout` to match.
+
+The reported rotation wraps at ±360: after `rotate 380` from 57 it reads 77.
+Tilt is read from `+QR,TILTVALUE;`.
 
 From Python: `await tt.wait_until_idle()` (or `rotate(..., wait=True)`; the
 same on `SyncDialAxisTurntable`) returns a `MotionState(rotation, tilt)` and
-raises `MotionTimeoutError` on timeout.
+raises `MotionTimeoutError` on timeout. Also:
+
+```python
+await tt.spin(1)                     # until tt.stop()
+await tt.disconnect(stop=False)      # leave a move or spin running
+await tt.run_sequence(
+    [("rotate", 380), ("tilt", 30), ("rotate", 380), ("tilt", -30), ("rotate", 380)],
+    on_progress=lambda i, state: print(i, state.rotation, state.tilt),
+)
+await tt.run_sequence(parse_sequence("r20 t5 r-20 t0"))
+```
+
+`run_sequence` validates every step first and raises `SequenceError`
+(a `ValueError`) on bad input; `on_progress(step_index, MotionState)` runs after
+each step settles. `SyncDialAxisTurntable` has the same `spin`, `run_sequence`
+and `disconnect(stop=...)`; its `on_progress` runs on the library's loop thread.
 
 ## Protocol
 
@@ -145,8 +185,8 @@ Write command → wait ~30 ms → read characteristic → response often `+DATA=
 |---------|----------|
 | `+QT,CHANGEANGLE;` | `+DATA=<degrees>;` rotation tracker |
 | `+QT,TURNSPEED;` | Current rotation speed |
-| `+QR,TILTANGLE;` | Current tilt |
-| `+QR,TILTVALUE;` | Current tilt (alias) |
+| `+QR,TILTANGLE;` | `+DATA=-30,30,X;` limits; X does not follow motion |
+| `+QR,TILTVALUE;` | Current tilt (live) |
 | `+QR,TILTSPEED;` | Current tilt speed |
 
 ## C library (optional)

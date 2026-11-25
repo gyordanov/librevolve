@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import threading
 from concurrent.futures import TimeoutError as FuturesTimeoutError
-from typing import List, Optional, Tuple
+from typing import Callable, Iterable, List, Optional, Tuple
 
 from librevolve.client import (
     DEFAULT_EPSILON_DEG,
@@ -17,6 +17,7 @@ from librevolve.client import (
     MotionState,
     TurntableNotConnectedError,
 )
+from librevolve.sequence import StepLike
 
 # Slack over the motion timeout so MotionTimeoutError, not the loop-bridge timeout, reports it.
 _WAIT_SLACK_S = 15.0
@@ -35,7 +36,7 @@ class SyncDialAxisTurntable:
         asyncio.set_event_loop(self._loop)
         self._loop.run_forever()
 
-    def _run(self, coro, timeout: float = 120.0):
+    def _run(self, coro, timeout: Optional[float] = 120.0):
         future = asyncio.run_coroutine_threadsafe(coro, self._loop)
         try:
             return future.result(timeout=timeout)
@@ -73,9 +74,9 @@ class SyncDialAxisTurntable:
     def connect(self, address: Optional[str] = None, timeout: float = 30.0) -> None:
         self._run(self._tt.connect(address=address, timeout=timeout), timeout=timeout + 15)
 
-    def disconnect(self) -> None:
+    def disconnect(self, stop: bool = True) -> None:
         if self._tt.is_connected:
-            self._run(self._tt.disconnect(), timeout=30)
+            self._run(self._tt.disconnect(stop=stop), timeout=30)
 
     def send(self, cmd: str) -> Optional[str]:
         return self._run(self._tt.send(cmd))
@@ -85,6 +86,26 @@ class SyncDialAxisTurntable:
 
     def tilt(self, degrees: float, *, wait: bool = False) -> Optional[str]:
         return self._run(self._tt.tilt(degrees, wait=wait), timeout=DEFAULT_WAIT_TIMEOUT_S + _WAIT_SLACK_S)
+
+    def spin(self, direction: int = 1) -> Optional[str]:
+        return self._run(self._tt.spin(direction))
+
+    def run_sequence(
+        self,
+        steps: Iterable[StepLike],
+        on_progress: Optional[Callable[[int, MotionState], None]] = None,
+        *,
+        base_timeout: float = DEFAULT_WAIT_TIMEOUT_S,
+        poll_interval: float = DEFAULT_POLL_INTERVAL_S,
+    ) -> MotionState:
+        """Blocking :meth:`DialAxisTurntable.run_sequence`; *on_progress* runs on the loop thread."""
+        # No bridge timeout: every step's wait is already bounded by its own scaled timeout.
+        return self._run(
+            self._tt.run_sequence(
+                list(steps), on_progress, base_timeout=base_timeout, poll_interval=poll_interval
+            ),
+            timeout=None,
+        )
 
     def stop(self) -> None:
         self._run(self._tt.stop())

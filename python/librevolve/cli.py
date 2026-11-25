@@ -14,6 +14,7 @@ from librevolve.client import (
     TurntableNotFoundError,
 )
 from librevolve.discovery import discover_turntables
+from librevolve.sequence import SequenceError, parse_sequence
 
 
 def _device_address():
@@ -43,7 +44,6 @@ async def _cmd_disconnect(tt: DialAxisTurntable, _args: argparse.Namespace) -> i
 
 
 async def _wait_for_motion(tt: DialAxisTurntable, args: argparse.Namespace) -> int:
-    # Disconnecting sends STOP, so returning before the move ends would cancel it.
     if args.no_wait:
         return 0
     try:
@@ -93,6 +93,41 @@ async def _cmd_zero(tt: DialAxisTurntable, args: argparse.Namespace) -> int:
     return await _wait_for_motion(tt, args)
 
 
+async def _cmd_spin(tt: DialAxisTurntable, args: argparse.Namespace) -> int:
+    await _ensure_connected(tt, args)
+    resp = await tt.spin(-1 if args.left else 1)
+    if resp:
+        print(resp)
+    return 0
+
+
+async def _cmd_sequence(tt: DialAxisTurntable, args: argparse.Namespace) -> int:
+    try:
+        steps = parse_sequence(args.steps)
+    except SequenceError as exc:
+        print(f'Invalid sequence: {exc}', file=sys.stderr)
+        return 2
+    await _ensure_connected(tt, args)
+
+    def report(index: int, state) -> None:
+        print(f'[{index + 1}/{len(steps)}] {steps[index]}: rotation={state.rotation} tilt={state.tilt}', flush=True)
+
+    try:
+        await tt.run_sequence(steps, report, base_timeout=args.wait_timeout)
+    except MotionTimeoutError as exc:
+        print(exc, file=sys.stderr)
+        return 1
+    except (asyncio.CancelledError, KeyboardInterrupt):
+        print('Interrupted, stopping', file=sys.stderr)
+        raise
+    return 0
+
+
+def _leaves_motion_running(args: argparse.Namespace) -> bool:
+    # A query must not halt a spin or a --no-wait move started by an earlier call.
+    return args.command in ('spin', 'angle') or getattr(args, 'no_wait', False)
+
+
 async def _cmd_send(tt: DialAxisTurntable, args: argparse.Namespace) -> int:
     await _ensure_connected(tt, args)
     resp = await tt.send(args.command)
@@ -110,7 +145,7 @@ def _add_wait_args(p: argparse.ArgumentParser) -> None:
     p.add_argument(
         '--no-wait',
         action='store_true',
-        help='Return right after the command is acknowledged (the disconnect STOP will likely cancel the move)',
+        help='Return right after the command is acknowledged; the move continues after exit',
     )
     p.add_argument(
         '--wait-timeout',
@@ -148,6 +183,26 @@ def _build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser('angle', help='Query rotation angle')
     p.set_defaults(func=_cmd_angle)
 
+    p = sub.add_parser('spin', help='Rotate continuously until `revolve stop`')
+    p.add_argument('--left', action='store_true', help='Spin the other way (TURNCONTINUE=-1)')
+    p.set_defaults(func=_cmd_spin)
+
+    p = sub.add_parser(
+        'sequence',
+        help='Run steps in order, e.g. "r380 t30 r380 t-30 r380"',
+        description='Steps: r<deg> rotate by deg, t<deg> tilt to absolute deg (-30..30), '
+        'z zero both axes, w<sec> pause. Each step waits for the table to settle. '
+        'Ctrl-C stops the table.',
+    )
+    p.add_argument('steps', help='Whitespace- or comma-separated steps')
+    p.add_argument(
+        '--wait-timeout',
+        type=float,
+        default=DEFAULT_WAIT_TIMEOUT_S,
+        help='Minimum per-step settle timeout; long moves get more (default: %(default)s)',
+    )
+    p.set_defaults(func=_cmd_sequence)
+
     sub.add_parser('stop', help='Stop both axes').set_defaults(func=_cmd_stop)
     p = sub.add_parser('zero', help='Return both axes to zero')
     _add_wait_args(p)
@@ -172,7 +227,7 @@ def main(argv: list[str] | None = None) -> int:
             return await args.func(tt, args)
         finally:
             if tt.is_connected and args.command not in ('connect', 'scan'):
-                await tt.disconnect()
+                await tt.disconnect(stop=not _leaves_motion_running(args))
 
     try:
         return asyncio.run(run())
